@@ -1,0 +1,111 @@
+@startuml Async_Callback_Mechanism
+
+title Asynchronous Callback Mechanism - Detailed View
+
+participant "Workflow MS" as Workflow
+participant "Action Executor" as Executor
+participant "External Service" as Service
+participant "Orchestrator MS" as Orchestrator
+database "Status DB" as StatusDB
+
+== Async Step Execution ==
+
+Workflow -> Executor: Execute Action\n(actionRef, input, callbackConfig)
+activate Executor
+
+Executor -> Executor: Load Action Config\nfrom Action Map
+
+Executor -> Service: HTTP Request\n(endpoint, method, headers, body)
+activate Service
+note right: Async execution\nwith timeout
+
+alt Service Response Success
+    Service --> Executor: 200 OK (response data)
+    
+    Executor -> Executor: Map Response\nto Output Schema
+    
+    Executor -> Orchestrator: POST {callbackUrl}\n{\n  executionId: "...",\n  stepId: "...",\n  status: "SUCCESS",\n  output: {...},\n  timestamp: "..."\n}
+    activate Orchestrator
+    
+    Orchestrator -> StatusDB: Update Step Result\n(stepId, status, output)
+    activate StatusDB
+    StatusDB --> Orchestrator: Updated
+    deactivate StatusDB
+    
+    Orchestrator -> Orchestrator: Evaluate Next Step\n(based on output)
+    
+    Orchestrator --> Executor: 200 OK (callback received)
+    deactivate Orchestrator
+    
+    Executor --> Workflow: Step Completed
+    deactivate Executor
+
+else Service Timeout
+    Service --x Executor: SocketTimeoutException
+    deactivate Service
+    
+    Executor -> Executor: Check Retry Policy\n(retryCount < maxAttempts)
+    
+    alt Retry Allowed
+        Executor -> Executor: Calculate Backoff\n(exponential: attempt * multiplier)
+        
+        Executor -> Executor: Wait (backoff period)
+        
+        Executor -> Service: HTTP Request (RETRY)\n(endpoint, method, headers, body)
+        activate Service
+        Service --> Executor: 200 OK (response data)
+        deactivate Service
+        
+        Executor -> Orchestrator: POST {callbackUrl}\n{\n  executionId: "...",\n  stepId: "...",\n  status: "SUCCESS",\n  output: {...},\n  retryAttempt: 1,\n  timestamp: "..."\n}
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Update Step Result\n(with retry info)
+        activate StatusDB
+        StatusDB --> Orchestrator: Updated
+        deactivate StatusDB
+        
+        Orchestrator --> Executor: 200 OK
+        deactivate Orchestrator
+        
+    else Max Retries Exceeded
+        Executor -> Orchestrator: POST {callbackUrl}\n{\n  executionId: "...",\n  stepId: "...",\n  status: "TIMEOUT",\n  error: {\n    errorCode: "MAX_RETRIES_EXCEEDED",\n    retryCount: 3\n  },\n  timestamp: "..."\n}
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Update Step Result\n(status=TIMEOUT)
+        activate StatusDB
+        StatusDB --> Orchestrator: Updated
+        deactivate StatusDB
+        
+        Orchestrator -> Orchestrator: Route to Timeout Handler\n(DECISION_KYC_TIMEOUT)
+        
+        Orchestrator --> Executor: 200 OK
+        deactivate Orchestrator
+    end
+    
+    Executor --> Workflow: Step Completed (with retry info)
+    deactivate Executor
+
+else Service Error (4xx/5xx)
+    Service --> Executor: 400/500 Error Response
+    deactivate Service
+    
+    Executor -> Executor: Map Error Response
+    
+    Executor -> Orchestrator: POST {callbackUrl}\n{\n  executionId: "...",\n  stepId: "...",\n  status: "FAILED",\n  error: {\n    errorCode: "...",\n    errorMessage: "..."\n  },\n  timestamp: "..."\n}
+    activate Orchestrator
+    
+    Orchestrator -> StatusDB: Update Step Result\n(status=FAILED, error)
+    activate StatusDB
+    StatusDB --> Orchestrator: Updated
+    deactivate StatusDB
+    
+    Orchestrator -> Orchestrator: Route to Error Handler
+    
+    Orchestrator --> Executor: 200 OK
+    deactivate Orchestrator
+    
+    Executor --> Workflow: Step Failed
+    deactivate Executor
+end
+
+@enduml

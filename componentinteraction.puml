@@ -1,0 +1,130 @@
+@startuml Architecture_Static_View_With_Connections
+
+title Microservices Architecture - Component Connections
+
+skinparam componentStyle rectangle
+skinparam defaultTextAlignment center
+
+package "Client Layer" {
+    [Customer Application] as Client
+}
+
+package "Gateway Layer" {
+    [API Gateway] as Gateway
+}
+
+package "Orchestration Layer" {
+    
+    frame "Orchestrator MS" #LightYellow {
+        component [Lifecycle\nManager] as LM
+        component [Status\nManager] as SM
+        component [Response\nHandler] as RH
+        component [Workflow\nTrigger] as WT
+        database "Execution\nStatus DB" as StatusDB
+    }
+    
+    frame "Workflow MS" #Wheat {
+        component [Workflow\nEngine] as WE
+        component [Rule\nEvaluator] as RE
+        component [Retry\nHandler] as RetryH
+        component [Compensation\nManager] as CM
+        database "Workflow\nRegistry" as Reg
+    }
+}
+
+package "Domain Services Layer" {
+    [Account Service] as AS
+    [KYC Service] as KS
+    [Credit Service] as CS
+    [Notification Service] as NS
+    [Audit Service] as AuS
+}
+
+package "Data Layer" {
+    database "Account DB" as ADB
+    database "KYC DB" as KDB
+    database "Credit DB" as CDB
+    database "Audit DB" as AuDB
+}
+
+' Main Flow Connections
+Client -down-> Gateway : HTTP Request
+Gateway -down-> LM : REST API
+
+' Orchestrator MS Internal
+LM -right-> SM : Create/Update\nExecution
+SM -down-> StatusDB : Store Status
+LM -right-> WT : Trigger Workflow
+
+' Orchestrator to Workflow MS
+WT -down-> WE : HTTP POST\n/workflows/execute
+
+' Workflow MS Internal
+WE -right-> Reg : Load Config
+WE -down-> RE : Evaluate\nPre/Post Rules
+WE -down-> RetryH : Execute Steps
+RetryH -left-> CM : On Failure
+
+' Workflow MS to Domain Services
+RetryH -down-> AS : REST Call
+RetryH -down-> KS : REST Call
+RetryH -down-> CS : REST Call
+RetryH -down-> NS : REST Call
+
+' Workflow MS Compensation
+CM ..> KS : Compensate\n(Cancel KYC)
+CM ..> AS : Compensate\n(Delete Account)
+
+' Workflow MS back to Orchestrator
+WE -up-> WT : Return Result
+
+' Orchestrator Response Flow
+WT -left-> SM : Update Status
+SM -down-> AuS : Log Execution
+AuS -down-> AuDB : Store Audit
+SM -up-> RH : Format Response
+RH -up-> Gateway : HTTP Response
+Gateway -up-> Client : Response
+
+' Domain Services to Databases
+AS -down-> ADB : JDBC
+KS -down-> KDB : JDBC
+CS -down-> CDB : JDBC
+
+note right of StatusDB
+  Stores:
+  • Execution ID
+  • Workflow ID
+  • Status (INITIATED, SUCCESS, FAILED)
+  • Step Results
+  • Timestamps
+end note
+
+note right of Reg
+  Stores:
+  • Workflow Definitions (JSON)
+  • Step Configurations
+  • Rule Expressions
+  • Retry Policies
+end note
+
+note bottom of "Orchestrator MS"
+  **Orchestrator MS Responsibilities**
+  1. Receive client requests
+  2. Create execution records
+  3. Trigger Workflow MS
+  4. Store execution status
+  5. Handle responses
+  6. Coordinate audit logging
+end note
+
+note bottom of "Workflow MS"
+  **Workflow MS Responsibilities**
+  1. Load workflow configuration
+  2. Evaluate dynamic rules (SpEL)
+  3. Execute steps with retry
+  4. Handle compensation (Saga)
+  5. Return results to Orchestrator
+end note
+
+@enduml

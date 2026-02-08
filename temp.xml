@@ -1,0 +1,70 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36" version="29.3.8">
+  <diagram name="Create Customer Use Case" id="usecase">
+    <mxGraphModel dx="1473" dy="735" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#1A237E;" value="Create Customer - Use Case Diagram" vertex="1">
+          <mxGeometry height="40" width="600" x="300" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="system" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1565C0;strokeWidth=2;fontSize=14;fontStyle=1;startSize=40;" value="Customer Management System" vertex="1">
+          <mxGeometry height="700" width="700" x="300" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="uc1" parent="system" style="ellipse;whiteSpace=wrap;html=1;fillColor=#BBDEFB;strokeColor=#1976D2;strokeWidth=2;fontSize=11;fontStyle=1;" value="Check Customer&lt;br&gt;Exists" vertex="1">
+          <mxGeometry height="70" width="140" x="180" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="uc2" parent="system" style="ellipse;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#388E3C;strokeWidth=2;fontSize=11;fontStyle=1;" value="Return Existing&lt;br&gt;Customer Details" vertex="1">
+          <mxGeometry height="70" width="140" x="450" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="uc3" parent="system" style="ellipse;whiteSpace=wrap;html=1;fillColor=#FFE082;strokeColor=#F57C00;strokeWidth=2;fontSize=11;fontStyle=1;" value="Conduct KYC&lt;br&gt;Check" vertex="1">
+          <mxGeometry height="70" width="140" x="180" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="uc4" parent="system" style="ellipse;whiteSpace=wrap;html=1;fillColor=#C8E6C9;strokeColor=#388E3C;strokeWidth=2;fontSize=11;fontStyle=1;" value="Create Customer&lt;br&gt;Account" vertex="1">
+          <mxGeometry height="70" width="140" x="450" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="uc5" parent="system" style="ellipse;whiteSpace=wrap;html=1;fillColor=#FFCDD2;strokeColor=#D32F2F;strokeWidth=2;fontSize=11;fontStyle=1;" value="Return KYC&lt;br&gt;Rejection Error" vertex="1">
+          <mxGeometry height="70" width="140" x="450" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="uc6" parent="system" style="ellipse;whiteSpace=wrap;html=1;fillColor=#FFF59D;strokeColor=#F9A825;strokeWidth=2;fontSize=11;fontStyle=1;" value="Retry KYC&lt;br&gt;Service Call" vertex="1">
+          <mxGeometry height="70" width="140" x="180" y="412" as="geometry" />
+        </mxCell>
+        <mxCell id="uc7" parent="system" style="ellipse;whiteSpace=wrap;html=1;fillColor=#FFCDD2;strokeColor=#D32F2F;strokeWidth=2;fontSize=11;fontStyle=1;" value="Handle Timeout/&lt;br&gt;No Response" vertex="1">
+          <mxGeometry height="70" width="140" x="180" y="532" as="geometry" />
+        </mxCell>
+        <mxCell id="actor" parent="1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;fillColor=#BBDEFB;strokeColor=#1976D2;strokeWidth=2;fontSize=12;fontStyle=1;" value="Customer" vertex="1">
+          <mxGeometry height="120" width="60" x="150" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="kyc_system" parent="1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;fillColor=#FFE082;strokeColor=#F57C00;strokeWidth=2;fontSize=12;fontStyle=1;" value="KYC Service" vertex="1">
+          <mxGeometry height="120" width="60" x="1080" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="rel1" edge="1" parent="1" source="actor" style="endArrow=none;html=1;strokeWidth=2;strokeColor=#1976D2;" target="uc1" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel2" edge="1" parent="1" source="uc1" style="endArrow=open;dashed=1;html=1;strokeWidth=2;strokeColor=#388E3C;fontSize=10;" target="uc2" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;&lt;br&gt;[Customer Exists]">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel3" edge="1" parent="1" source="uc1" style="endArrow=open;dashed=1;html=1;strokeWidth=2;strokeColor=#F57C00;fontSize=10;" target="uc3" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;&lt;br&gt;[Customer Not Exists]">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel4" edge="1" parent="1" source="uc3" style="endArrow=open;dashed=1;html=1;strokeWidth=2;strokeColor=#F57C00;fontSize=10;" target="kyc_system" value="&amp;lt;&amp;lt;include&amp;gt;&amp;gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel5" edge="1" parent="1" source="uc3" style="endArrow=open;dashed=1;html=1;strokeWidth=2;strokeColor=#388E3C;fontSize=10;" target="uc4" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;&lt;br&gt;[KYC Cleared]">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel6" edge="1" parent="1" source="uc3" style="endArrow=open;dashed=1;html=1;strokeWidth=2;strokeColor=#D32F2F;fontSize=10;" target="uc5" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;&lt;br&gt;[KYC Rejected]">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel7" edge="1" parent="1" source="uc3" style="endArrow=open;dashed=1;html=1;strokeWidth=2;strokeColor=#F9A825;fontSize=10;" target="uc6" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;&lt;br&gt;[Timeout/No Response]">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel8" edge="1" parent="1" source="uc6" style="endArrow=open;dashed=1;html=1;strokeWidth=2;strokeColor=#F9A825;fontSize=10;" target="uc3" value="&amp;lt;&amp;lt;include&amp;gt;&amp;gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel9" edge="1" parent="1" source="uc6" style="endArrow=open;dashed=1;html=1;strokeWidth=2;strokeColor=#D32F2F;fontSize=10;" target="uc7" value="&amp;lt;&amp;lt;extend&amp;gt;&amp;gt;&lt;br&gt;[Max Retries Exceeded]">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

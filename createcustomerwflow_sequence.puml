@@ -1,0 +1,786 @@
+@startuml Create_Customer_Workflow_Complete_With_Retry_And_Manual_Review
+
+title Create Customer Workflow - Complete Flow (Success, Rejection, Timeout & Manual Review)
+
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam BoxPadding 10
+skinparam ParticipantPadding 20
+
+autonumber "<b>[000]"
+
+actor "Customer" as Customer
+participant "API Gateway" as Gateway
+participant "Orchestrator MS" as Orchestrator
+database "Execution Status DB" as StatusDB
+participant "Workflow MS" as Workflow
+participant "Customer Service" as CustomerService
+participant "KYC Service" as KYCService
+participant "Manual Review Service" as ManualReview
+participant "Audit Service" as AuditService
+
+== Workflow Initiation ==
+
+Customer -> Gateway: POST /api/v1/customers/create
+activate Gateway
+
+Gateway -> Orchestrator: Create Customer Request
+activate Orchestrator
+
+Orchestrator -> StatusDB: Create Execution Record\n(executionId, status=INITIATED)
+activate StatusDB
+StatusDB --> Orchestrator: Execution Created
+deactivate StatusDB
+
+Orchestrator -> Workflow: POST /workflows/execute\n(workflowId, executionId, request)
+activate Workflow
+
+Workflow --> Orchestrator: 202 Accepted
+
+Orchestrator --> Gateway: 202 Accepted
+
+Gateway --> Customer: 202 Accepted\n(executionId, statusUrl)
+deactivate Gateway
+
+note over Customer
+  Customer receives executionId
+  and can poll for status
+end note
+
+== Step 1: Check Customer Exists ==
+
+Workflow -> CustomerService: POST /customers/search
+activate CustomerService
+CustomerService --> Workflow: 200 OK (exists, customerData)
+deactivate CustomerService
+
+Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_1, SUCCESS, exists)
+activate AuditService
+note right: Non-blocking async call
+AuditService --> Workflow: 201 Created
+deactivate AuditService
+
+Workflow -> Orchestrator: POST /callback\n(stepId=STEP_1, status=SUCCESS)
+activate Orchestrator
+
+Orchestrator -> StatusDB: Update (STEP_1=SUCCESS)
+activate StatusDB
+StatusDB --> Orchestrator: Updated
+deactivate StatusDB
+
+Orchestrator --> Workflow: 200 OK
+deactivate Orchestrator
+
+== Decision: Customer Exists? ==
+
+alt Customer Already Exists
+    
+    Workflow -> Workflow: Evaluate Decision\n(exists=true) → RETURN_EXISTING_CUSTOMER
+    
+    Workflow -> AuditService: POST /audit/logs (ASYNC)\n(DECISION, outcome=CUSTOMER_EXISTS)
+    activate AuditService
+    note right: Non-blocking async call
+    AuditService --> Workflow: 201 Created
+    deactivate AuditService
+    
+    == Step 2A: Return Existing Customer Details ==
+    
+    Workflow -> Workflow: Execute RETURN_EXISTING_CUSTOMER\n(Format response with existing data)
+    
+    Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_2A, SUCCESS, customerId)
+    activate AuditService
+    note right: Non-blocking async call
+    AuditService --> Workflow: 201 Created
+    deactivate AuditService
+    
+    Workflow -> Orchestrator: POST /callback\n(stepId=STEP_2A, status=SUCCESS,\nfinalResponse)
+    activate Orchestrator
+    
+    Orchestrator -> StatusDB: Update Execution Status\n(status=COMPLETED, outcome=CUSTOMER_EXISTS)
+    activate StatusDB
+    StatusDB --> Orchestrator: Updated
+    deactivate StatusDB
+    
+    Orchestrator -> AuditService: POST /audit/logs (ASYNC)\n(workflow status=COMPLETED,\noutcome=CUSTOMER_EXISTS)
+    activate AuditService
+    note right: Non-blocking async call
+    AuditService --> Orchestrator: 201 Created
+    deactivate AuditService
+    
+    Orchestrator --> Workflow: 200 OK
+    deactivate Orchestrator
+    deactivate Workflow
+    
+    note over Orchestrator, StatusDB
+      Workflow completed
+      Customer already exists
+    end note
+    
+    == Customer Polls for Status (Customer Exists) ==
+    
+    Customer -> Gateway: GET /executions/{id}/status
+    activate Gateway
+    
+    Gateway -> Orchestrator: GET /executions/{id}
+    activate Orchestrator
+    
+    Orchestrator -> StatusDB: Query Execution Status
+    activate StatusDB
+    StatusDB --> Orchestrator: status=COMPLETED,\noutcome=CUSTOMER_EXISTS
+    deactivate StatusDB
+    
+    Orchestrator --> Gateway: 200 OK (status=COMPLETED)
+    deactivate Orchestrator
+    
+    Gateway --> Customer: 200 OK\n(status=COMPLETED,\nresponseCode=CUSTOMER_ALREADY_EXISTS,\nexistingCustomerData)
+    deactivate Gateway
+    
+    note over Customer
+      Customer already exists
+      Existing details returned
+    end note
+    
+    opt If webhook registered
+        Orchestrator -> Gateway: POST {webhookUrl}
+        activate Gateway
+        Gateway -> Customer: POST (CUSTOMER_EXISTS notification)
+        activate Customer
+        Customer --> Gateway: 200 OK
+        deactivate Customer
+        Gateway --> Orchestrator: 200 OK
+        deactivate Gateway
+    end
+
+else Customer Does Not Exist - Proceed with KYC
+
+    Workflow -> Workflow: Evaluate Decision\n(exists=false) → KYC_CHECK
+    
+    Workflow -> AuditService: POST /audit/logs (ASYNC)\n(DECISION, outcome=KYC_REQUIRED)
+    activate AuditService
+    note right: Non-blocking async call
+    AuditService --> Workflow: 201 Created
+    deactivate AuditService
+
+    == SUCCESS PATH: KYC Cleared (First Attempt) ==
+    
+    alt Success Path - KYC Cleared
+        
+        Workflow -> KYCService: POST /kyc/validate
+        activate KYCService
+        
+        KYCService --> Workflow: 200 OK\n(kycStatus=CLEARED, score=85)
+        deactivate KYCService
+        
+        Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_2B, SUCCESS, kycStatus=CLEARED)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Workflow: 201 Created
+        deactivate AuditService
+        
+        Workflow -> Orchestrator: POST /callback\n(stepId=STEP_2B, status=SUCCESS)
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Update (STEP_2B=SUCCESS)
+        activate StatusDB
+        StatusDB --> Orchestrator: Updated
+        deactivate StatusDB
+        
+        Orchestrator --> Workflow: 200 OK
+        deactivate Orchestrator
+        
+        == Decision: KYC Status ==
+        
+        Workflow -> Workflow: Evaluate Decision\n(kycStatus=CLEARED) → CREATE_CUSTOMER
+        
+        Workflow -> AuditService: POST /audit/logs (ASYNC)\n(DECISION, outcome=PROCEED_TO_CREATE)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Workflow: 201 Created
+        deactivate AuditService
+        
+        == Step 3A: Create Customer Account ==
+        
+        Workflow -> CustomerService: POST /customers
+        activate CustomerService
+        
+        CustomerService --> Workflow: 201 Created\n(customerId, accountNumber, status=ACTIVE)
+        deactivate CustomerService
+        
+        Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_3A, SUCCESS, customerId)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Workflow: 201 Created
+        deactivate AuditService
+        
+        Workflow -> Orchestrator: POST /callback\n(stepId=STEP_3A, status=SUCCESS)
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Update (STEP_3A=SUCCESS)
+        activate StatusDB
+        StatusDB --> Orchestrator: Updated
+        deactivate StatusDB
+        
+        Orchestrator --> Workflow: 200 OK
+        deactivate Orchestrator
+        
+        == Format Success Response ==
+        
+        Workflow -> Workflow: Execute SUCCESS_RESPONSE
+        
+        Workflow -> AuditService: POST /audit/logs (ASYNC)\n(SUCCESS_RESPONSE, outcome=COMPLETED)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Workflow: 201 Created
+        deactivate AuditService
+        
+        Workflow -> Orchestrator: POST /callback\n(stepId=SUCCESS_RESPONSE,\nstatus=SUCCESS, finalResponse)
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Update (status=COMPLETED)
+        activate StatusDB
+        StatusDB --> Orchestrator: Updated
+        deactivate StatusDB
+        
+        Orchestrator -> AuditService: POST /audit/logs (ASYNC)\n(workflow status=COMPLETED)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Orchestrator: 201 Created
+        deactivate AuditService
+        
+        Orchestrator --> Workflow: 200 OK
+        deactivate Orchestrator
+        deactivate Workflow
+        
+        == Customer Polls for Status (SUCCESS) ==
+        
+        Customer -> Gateway: GET /executions/{id}/status
+        activate Gateway
+        
+        Gateway -> Orchestrator: GET /executions/{id}
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Query Execution Status
+        activate StatusDB
+        StatusDB --> Orchestrator: status=COMPLETED, outcome=SUCCESS
+        deactivate StatusDB
+        
+        Orchestrator --> Gateway: 200 OK (status=COMPLETED)
+        deactivate Orchestrator
+        
+        Gateway --> Customer: 200 OK\n(status=COMPLETED, customerData)
+        deactivate Gateway
+        
+        note over Customer
+          SUCCESS: Customer account created
+        end note
+        
+        opt If webhook registered
+            Orchestrator -> Gateway: POST {webhookUrl}
+            activate Gateway
+            Gateway -> Customer: POST (SUCCESS notification)
+            activate Customer
+            Customer --> Gateway: 200 OK
+            deactivate Customer
+            Gateway --> Orchestrator: 200 OK
+            deactivate Gateway
+        end
+    
+    else Failure Path - KYC Rejected
+        
+        autonumber 30 "<b>[000]"
+        
+        Workflow -> KYCService: POST /kyc/validate
+        activate KYCService
+        
+        KYCService --> Workflow: 400 Bad Request\n(kycStatus=REJECTED, rejectionReasons)
+        deactivate KYCService
+        
+        Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_2B, FAILED, kycStatus=REJECTED)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Workflow: 201 Created
+        deactivate AuditService
+        
+        Workflow -> Orchestrator: POST /callback\n(stepId=STEP_2B, status=FAILED)
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Update (STEP_2B=FAILED)
+        activate StatusDB
+        StatusDB --> Orchestrator: Updated
+        deactivate StatusDB
+        
+        Orchestrator --> Workflow: 200 OK
+        deactivate Orchestrator
+        
+        == Decision: KYC Status ==
+        
+        Workflow -> Workflow: Evaluate Decision\n(kycStatus=REJECTED) → RETURN_ERROR
+        
+        Workflow -> AuditService: POST /audit/logs (ASYNC)\n(DECISION, outcome=KYC_REJECTED)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Workflow: 201 Created
+        deactivate AuditService
+        
+        == Format Rejection Response ==
+        
+        Workflow -> Workflow: Execute REJECTION_RESPONSE
+        
+        Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_3B, ERROR, outcome=KYC_REJECTED)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Workflow: 201 Created
+        deactivate AuditService
+        
+        Workflow -> Orchestrator: POST /callback\n(stepId=STEP_3B, status=ERROR,\nfinalResponse)
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Update (status=FAILED)
+        activate StatusDB
+        StatusDB --> Orchestrator: Updated
+        deactivate StatusDB
+        
+        Orchestrator -> AuditService: POST /audit/logs (ASYNC)\n(workflow status=FAILED)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Orchestrator: 201 Created
+        deactivate AuditService
+        
+        Orchestrator --> Workflow: 200 OK
+        deactivate Orchestrator
+        deactivate Workflow
+        
+        == Customer Polls for Status (REJECTION) ==
+        
+        Customer -> Gateway: GET /executions/{id}/status
+        activate Gateway
+        
+        Gateway -> Orchestrator: GET /executions/{id}
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Query Execution Status
+        activate StatusDB
+        StatusDB --> Orchestrator: status=FAILED, outcome=KYC_REJECTED
+        deactivate StatusDB
+        
+        Orchestrator --> Gateway: 200 OK (status=FAILED)
+        deactivate Orchestrator
+        
+        Gateway --> Customer: 200 OK\n(status=FAILED, rejectionReasons)
+        deactivate Gateway
+        
+        note over Customer
+          FAILED: KYC rejected with reasons
+        end note
+        
+        opt If webhook registered
+            Orchestrator -> Gateway: POST {webhookUrl}
+            activate Gateway
+            Gateway -> Customer: POST (REJECTION notification)
+            activate Customer
+            Customer --> Gateway: 200 OK
+            deactivate Customer
+            Gateway --> Orchestrator: 200 OK
+            deactivate Gateway
+        end
+    
+    else Timeout Path - KYC No Response with Retry & Manual Review
+        
+        autonumber 30 "<b>[000]"
+        
+        == KYC Retry Loop (Max 3 Attempts) ==
+        
+        loop Retry: attempt=1 to 3
+            
+            Workflow -> KYCService: POST /kyc/validate\n[Attempt: {attempt}]
+            activate KYCService
+            
+            note right of KYCService
+              KYC Service timeout
+              No response within 10s
+            end note
+            
+            KYCService --x Workflow: SocketTimeoutException
+            deactivate KYCService
+            
+            Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_2B, TIMEOUT, attempt={n})
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Workflow: 201 Created
+            deactivate AuditService
+            
+            Workflow -> Orchestrator: POST /callback\n(stepId=STEP_2B, status=TIMEOUT,\nattempt={n})
+            activate Orchestrator
+            
+            Orchestrator -> StatusDB: Update (STEP_2B=TIMEOUT, attempt={n})
+            activate StatusDB
+            StatusDB --> Orchestrator: Updated
+            deactivate StatusDB
+            
+            Orchestrator --> Workflow: 200 OK
+            deactivate Orchestrator
+            
+            alt If attempt < maxAttempts
+                
+                Workflow -> Workflow: Calculate Backoff\n(backoff = 1000ms * 2^attempt)
+                
+                Workflow -> AuditService: POST /audit/logs (ASYNC)\n(DECISION_RETRY, attempt={n+1})
+                activate AuditService
+                note right: Non-blocking async call
+                AuditService --> Workflow: 201 Created
+                deactivate AuditService
+                
+                Workflow -> Workflow: Wait (Exponential Backoff)
+                
+                note over Workflow
+                  Backoff: 2s, 4s, 8s
+                end note
+                
+            else If attempt >= maxAttempts
+                
+                Workflow -> Workflow: Max Retries Exceeded\n→ Route to Manual Review
+                
+                Workflow -> AuditService: POST /audit/logs (ASYNC)\n(DECISION_RETRY,\noutcome=MAX_RETRIES_EXCEEDED)
+                activate AuditService
+                note right: Non-blocking async call
+                AuditService --> Workflow: 201 Created
+                deactivate AuditService
+                
+            end
+            
+        end
+        
+        note over Workflow
+          After 3 failed attempts,
+          route to manual review
+        end note
+        
+        == Trigger Manual Review ==
+        
+        Workflow -> ManualReview: POST /manual-review/create\n(reviewType=KYC_VALIDATION,\nreason=TIMEOUT_AFTER_3_ATTEMPTS)
+        activate ManualReview
+        
+        ManualReview -> ManualReview: Create Review Task\nAssign to Reviewer
+        
+        ManualReview --> Workflow: 201 Created\n(reviewId, status=PENDING_REVIEW)
+        deactivate ManualReview
+        
+        Workflow -> AuditService: POST /audit/logs (ASYNC)\n(MANUAL_REVIEW_TRIGGERED,\nreviewId, assignedTo)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Workflow: 201 Created
+        deactivate AuditService
+        
+        Workflow -> Orchestrator: POST /callback\n(stepId=MANUAL_REVIEW_TRIGGERED,\nstatus=PENDING, reviewId)
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Update\n(status=PENDING_MANUAL_REVIEW)
+        activate StatusDB
+        StatusDB --> Orchestrator: Updated
+        deactivate StatusDB
+        
+        Orchestrator -> AuditService: POST /audit/logs (ASYNC)\n(workflow status=PENDING_MANUAL_REVIEW)
+        activate AuditService
+        note right: Non-blocking async call
+        AuditService --> Orchestrator: 201 Created
+        deactivate AuditService
+        
+        Orchestrator --> Workflow: 200 OK
+        deactivate Orchestrator
+        deactivate Workflow
+        
+        note over Workflow, ManualReview
+          Workflow suspended
+          Awaiting manual review (Est: 4h)
+        end note
+        
+        == Customer Polls During Manual Review ==
+        
+        Customer -> Gateway: GET /executions/{id}/status
+        activate Gateway
+        
+        Gateway -> Orchestrator: GET /executions/{id}
+        activate Orchestrator
+        
+        Orchestrator -> StatusDB: Query Execution Status
+        activate StatusDB
+        StatusDB --> Orchestrator: status=PENDING_MANUAL_REVIEW
+        deactivate StatusDB
+        
+        Orchestrator --> Gateway: 200 OK\n(status=PENDING_MANUAL_REVIEW)
+        deactivate Orchestrator
+        
+        Gateway --> Customer: 200 OK\n(status=PENDING_MANUAL_REVIEW,\nreviewId, estimatedTime)
+        deactivate Gateway
+        
+        note over Customer
+          Application under manual review
+        end note
+        
+        == Manual Review Completed ==
+        
+        ... Manual Review Process (Human Decision) ...
+        
+        group Manual Review - APPROVED (Join Success Path)
+            
+            ManualReview -> Orchestrator: POST /callback\n(reviewId, reviewStatus=APPROVED,\nkycStatus=CLEARED)
+            activate Orchestrator
+            activate ManualReview
+            
+            Orchestrator -> StatusDB: Update (reviewStatus=APPROVED)
+            activate StatusDB
+            StatusDB --> Orchestrator: Updated
+            deactivate StatusDB
+            
+            Orchestrator -> AuditService: POST /audit/logs (ASYNC)\n(MANUAL_REVIEW_COMPLETED,\nstatus=APPROVED)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Orchestrator: 201 Created
+            deactivate AuditService
+            
+            Orchestrator --> ManualReview: 200 OK
+            deactivate ManualReview
+            
+            Orchestrator -> Workflow: POST /workflows/resume\n(executionId, manualReviewResult)
+            activate Workflow
+            
+            Workflow --> Orchestrator: 202 Accepted
+            deactivate Orchestrator
+            
+            note over Workflow
+              Resume workflow with
+              kycStatus=CLEARED
+              → Join SUCCESS path
+            end note
+            
+            Workflow -> Workflow: Evaluate Decision\n(kycStatus=CLEARED) → CREATE_CUSTOMER
+            
+            Workflow -> AuditService: POST /audit/logs (ASYNC)\n(DECISION, outcome=PROCEED_TO_CREATE)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Workflow: 201 Created
+            deactivate AuditService
+            
+            Workflow -> CustomerService: POST /customers\n(verificationMethod=MANUAL_REVIEW)
+            activate CustomerService
+            
+            CustomerService --> Workflow: 201 Created\n(customerId, accountNumber)
+            deactivate CustomerService
+            
+            Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_3A, SUCCESS, customerId)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Workflow: 201 Created
+            deactivate AuditService
+            
+            Workflow -> Orchestrator: POST /callback\n(stepId=STEP_3A, status=SUCCESS)
+            activate Orchestrator
+            
+            Orchestrator -> StatusDB: Update (STEP_3A=SUCCESS)
+            activate StatusDB
+            StatusDB --> Orchestrator: Updated
+            deactivate StatusDB
+            
+            Orchestrator --> Workflow: 200 OK
+            deactivate Orchestrator
+            
+            Workflow -> Workflow: Execute SUCCESS_RESPONSE
+            
+            Workflow -> AuditService: POST /audit/logs (ASYNC)\n(SUCCESS_RESPONSE, COMPLETED)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Workflow: 201 Created
+            deactivate AuditService
+            
+            Workflow -> Orchestrator: POST /callback\n(stepId=SUCCESS_RESPONSE,\nstatus=SUCCESS, finalResponse)
+            activate Orchestrator
+            
+            Orchestrator -> StatusDB: Update (status=COMPLETED)
+            activate StatusDB
+            StatusDB --> Orchestrator: Updated
+            deactivate StatusDB
+            
+            Orchestrator -> AuditService: POST /audit/logs (ASYNC)\n(workflow status=COMPLETED)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Orchestrator: 201 Created
+            deactivate AuditService
+            
+            Orchestrator --> Workflow: 200 OK
+            deactivate Orchestrator
+            deactivate Workflow
+            
+            == Customer Receives Final Response ==
+            
+            Customer -> Gateway: GET /executions/{id}/status
+            activate Gateway
+            
+            Gateway -> Orchestrator: GET /executions/{id}
+            activate Orchestrator
+            
+            Orchestrator -> StatusDB: Query Execution Status
+            activate StatusDB
+            StatusDB --> Orchestrator: status=COMPLETED
+            deactivate StatusDB
+            
+            Orchestrator --> Gateway: 200 OK (status=COMPLETED)
+            deactivate Orchestrator
+            
+            Gateway --> Customer: 200 OK\n(status=COMPLETED, customerData,\nverificationMethod=MANUAL_REVIEW)
+            deactivate Gateway
+            
+            note over Customer
+              SUCCESS: Account created
+              after manual review
+            end note
+            
+            opt If webhook registered
+                Orchestrator -> Gateway: POST {webhookUrl}
+                activate Gateway
+                Gateway -> Customer: POST (SUCCESS notification)
+                activate Customer
+                Customer --> Gateway: 200 OK
+                deactivate Customer
+                Gateway --> Orchestrator: 200 OK
+                deactivate Gateway
+            end
+            
+        end
+        
+        group Manual Review - REJECTED (Join Failure Path)
+            
+            ManualReview -> Orchestrator: POST /callback\n(reviewId, reviewStatus=REJECTED,\nkycStatus=REJECTED)
+            activate Orchestrator
+            activate ManualReview
+            
+            Orchestrator -> StatusDB: Update (reviewStatus=REJECTED)
+            activate StatusDB
+            StatusDB --> Orchestrator: Updated
+            deactivate StatusDB
+            
+            Orchestrator -> AuditService: POST /audit/logs (ASYNC)\n(MANUAL_REVIEW_COMPLETED,\nstatus=REJECTED)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Orchestrator: 201 Created
+            deactivate AuditService
+            
+            Orchestrator --> ManualReview: 200 OK
+            deactivate ManualReview
+            
+            Orchestrator -> Workflow: POST /workflows/resume\n(executionId, manualReviewResult)
+            activate Workflow
+            
+            Workflow --> Orchestrator: 202 Accepted
+            deactivate Orchestrator
+            
+            note over Workflow
+              Resume workflow with
+              kycStatus=REJECTED
+              → Join FAILURE path
+            end note
+            
+            Workflow -> Workflow: Evaluate Decision\n(kycStatus=REJECTED) → RETURN_ERROR
+            
+            Workflow -> AuditService: POST /audit/logs (ASYNC)\n(DECISION, outcome=KYC_REJECTED)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Workflow: 201 Created
+            deactivate AuditService
+            
+            Workflow -> Workflow: Execute REJECTION_RESPONSE
+            
+            Workflow -> AuditService: POST /audit/logs (ASYNC)\n(STEP_3B, ERROR, KYC_REJECTED)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Workflow: 201 Created
+            deactivate AuditService
+            
+            Workflow -> Orchestrator: POST /callback\n(stepId=STEP_3B, status=ERROR,\nfinalResponse)
+            activate Orchestrator
+            
+            Orchestrator -> StatusDB: Update (status=FAILED)
+            activate StatusDB
+            StatusDB --> Orchestrator: Updated
+            deactivate StatusDB
+            
+            Orchestrator -> AuditService: POST /audit/logs (ASYNC)\n(workflow status=FAILED)
+            activate AuditService
+            note right: Non-blocking async call
+            AuditService --> Orchestrator: 201 Created
+            deactivate AuditService
+            
+            Orchestrator --> Workflow: 200 OK
+            deactivate Orchestrator
+            deactivate Workflow
+            
+            == Customer Receives Final Response ==
+            
+            Customer -> Gateway: GET /executions/{id}/status
+            activate Gateway
+            
+            Gateway -> Orchestrator: GET /executions/{id}
+            activate Orchestrator
+            
+            Orchestrator -> StatusDB: Query Execution Status
+            activate StatusDB
+            StatusDB --> Orchestrator: status=FAILED
+            deactivate StatusDB
+            
+            Orchestrator --> Gateway: 200 OK (status=FAILED)
+            deactivate Orchestrator
+            
+            Gateway --> Customer: 200 OK\n(status=FAILED, rejectionReasons,\nverificationMethod=MANUAL_REVIEW)
+            deactivate Gateway
+            
+            note over Customer
+              FAILED: KYC rejected
+              after manual review
+            end note
+            
+            opt If webhook registered
+                Orchestrator -> Gateway: POST {webhookUrl}
+                activate Gateway
+                Gateway -> Customer: POST (REJECTION notification)
+                activate Customer
+                Customer --> Gateway: 200 OK
+                deactivate Customer
+                Gateway --> Orchestrator: 200 OK
+                deactivate Gateway
+            end
+            
+        end
+        
+    end
+
+end
+
+note over Customer, AuditService
+  **Complete Flow Summary:**
+  
+  **Path 0: CUSTOMER EXISTS**
+  - Customer search returns exists=true
+  - Return existing customer details → COMPLETED
+  
+  **Path 1: SUCCESS** (First Attempt)
+  - Customer not found → KYC clears → Create customer → SUCCESS
+  
+  **Path 2: FAILURE** (First Attempt)
+  - Customer not found → KYC rejected → Return error → FAILED
+  
+  **Path 3: TIMEOUT → RETRY LOOP → MANUAL REVIEW → SUCCESS**
+  - Customer not found → 3 retry attempts → Manual review
+  - Review APPROVED → Join success path → SUCCESS
+  
+  **Path 4: TIMEOUT → RETRY LOOP → MANUAL REVIEW → FAILURE**
+  - Customer not found → 3 retry attempts → Manual review
+  - Review REJECTED → Join failure path → FAILED
+  
+  **Key Features:**
+  - Customer exists check at beginning
+  - Retry logic consolidated in single loop
+  - Simplified arrow labels
+  - Consistent async audit logging
+  - Customer receives final response in all scenarios
+end note
+
+@enduml

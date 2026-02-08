@@ -1,0 +1,65 @@
+@startuml Audit_Logging_Flow
+
+title Audit Logging Flow - Non-Blocking Async
+
+participant "Workflow MS" as Workflow
+participant "Audit Logger" as Logger
+participant "Audit Service" as AuditService
+queue "Audit Queue" as Queue
+database "Audit DB" as AuditDB
+
+== Synchronous Step Execution with Async Audit ==
+
+Workflow -> Workflow: Execute Step\n(e.g., DECISION_CUSTOMER_EXISTS)
+
+Workflow -> Logger: Log Audit (ASYNC)\n{\n  stepId: "...",\n  status: "...",\n  input: {...},\n  output: {...},\n  duration: ...\n}
+activate Logger
+
+note over Logger: Non-blocking call\nWorkflow continues
+
+Logger -> Queue: Enqueue Audit Message
+activate Queue
+Queue --> Logger: Queued
+deactivate Queue
+
+Logger --> Workflow: Audit Queued (immediately)
+deactivate Logger
+
+Workflow -> Workflow: Continue to Next Step\n(no waiting for audit)
+
+== Background Audit Processing ==
+
+Queue -> AuditService: Dequeue Audit Message
+activate AuditService
+
+AuditService -> AuditService: Enrich Audit Data\n(add metadata, mask sensitive fields)
+
+AuditService -> AuditDB: INSERT INTO audit_logs\n(auditId, workflowId, executionId,\nstepId, status, input, output,\nduration, timestamp, userId)
+activate AuditDB
+AuditDB --> AuditService: Inserted
+deactivate AuditDB
+
+AuditService --> Queue: Message Processed
+deactivate AuditService
+
+note over Workflow, AuditDB
+  Audit logging is fully asynchronous
+  and does not block workflow execution
+end note
+
+== Audit Query (Analytics/Monitoring) ==
+
+participant "Monitoring Dashboard" as Dashboard
+
+Dashboard -> AuditService: GET /api/v1/audit/logs\n?workflowId=CREATE_CUSTOMER_V1\n&executionId=...
+activate AuditService
+
+AuditService -> AuditDB: SELECT * FROM audit_logs\nWHERE workflowId = ?\nAND executionId = ?\nORDER BY timestamp
+activate AuditDB
+AuditDB --> AuditService: Audit Records
+deactivate AuditDB
+
+AuditService --> Dashboard: 200 OK\n[audit log entries]
+deactivate AuditService
+
+@enduml
