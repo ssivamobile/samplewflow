@@ -1,0 +1,12 @@
+{
+  "tickers": [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
+    "META", "TSLA", "NFLX", "AMD", "CRM"
+  ],
+  "filters": {
+    "min_market_cap": 10000000000,
+    "min_avg_volume": 1000000,
+    "max_pe_ratio": 80
+  },
+  "description": "Default swing-trading watchlist of high-liquidity large-cap tech stocks"
+}
