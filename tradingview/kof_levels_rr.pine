@@ -45,7 +45,11 @@ mTp1     = input.float(0.0, "TP1 (0 = none)", group="Manual trade (any model)")
 mTp2     = input.float(0.0, "TP2 (0 = none)", group="Manual trade (any model)")
 
 profSrc = input.string("1-minute bars", "Profile built from", options=["1-minute bars", "Chart bars"], group="Placeholders (NOT in article)", tooltip="Chart bars spread each bar's volume evenly over its high-low range, which inflates the value area on wide, heavy bars. 1-minute bars are closer to a tick profile. Needs a chart timeframe above 1 minute.")
+intraTf = input.string("1", "Intrabar timeframe for the profile", options=["1", "30S", "15S", "5S", "1S"], group="Placeholders (NOT in article)", tooltip="Added 2026-11-19 to test whether finer intrabar data closes the MNQ VAL gap against TradingView's SVP (1-minute bars left VAL 2.75 pts off). Seconds data needs a TradingView plan that has it and has limited history. Applies when 'Profile built from' is 1-minute bars. Opening range always uses 1-minute.")
+gridSnap = input.bool(false, "Snap profile rows to a fixed price grid", group="Placeholders (NOT in article)", tooltip="Added 2026-11-19. TradingView's Session Volume Profile levels sit on a fixed price grid (whole points on MNQ). With this off, rows start at the session's first open (offset by the open's fractional part). Tested against SVP on MNQ Nov 13-18.")
 tblPos  = input.string("bottom right", "Status table position", options=["top right", "top left", "bottom right", "bottom left"], group="Placeholders (NOT in article)")
+
+dbg     = input.bool(false, "Debug: raw 1-minute extrema in Data Window", group="Debug", tooltip="Added 2026-11-19 to chase bad VAL / opening-range values on QQQ. Plots to the Data Window only. Leave off for normal use.")
 
 vaPct   = 0.70 // article: value area = about 70% of volume
 binSize = syminfo.mintick * binTicks
@@ -54,7 +58,13 @@ binSize = syminfo.mintick * binTicks
 inRTH  = not na(time(timeframe.period, sRTH, tz))
 inON   = not na(time(timeframe.period, sON, tz))
 inCand = not na(time(timeframe.period, sCand, tz))
-newRTH = inRTH and not inRTH[1]
+// New RTH session: first RTH bar after a non-RTH bar, OR the calendar day (in tz) changed. The second test is
+// needed on RTH-only charts (e.g. stocks/ETFs with the chart set to RTH), where no non-RTH bar ever separates
+// two sessions and the first test alone never fires (levels and profile then accumulate across days).
+newRTH = inRTH and (not inRTH[1] or dayofmonth(time, tz) != dayofmonth(time[1], tz))
+var bool sawNonRTH = false
+if not inRTH
+    sawNonRTH := true
 newON  = inON and not inON[1]
 avgRng = ta.sma(high - low, 21)
 
@@ -89,7 +99,7 @@ if newRTH
     rthStart := time
     dayTrades := 0
     array.fill(vol, 0.0)
-    base := open
+    base := gridSnap ? math.floor(open / binSize) * binSize : open
     minI := 1999
     maxI := 0
 else if inRTH
@@ -154,9 +164,9 @@ f_va() =>
     float pocP = base + (pocI - 1000 + 0.5) * binSize
     [vahP, valP, pocP]
 
-array<float> pH = request.security_lower_tf(syminfo.tickerid, "1", high)
-array<float> pL = request.security_lower_tf(syminfo.tickerid, "1", low)
-array<float> pV = request.security_lower_tf(syminfo.tickerid, "1", volume)
+array<float> pH = request.security_lower_tf(syminfo.tickerid, intraTf, high)
+array<float> pL = request.security_lower_tf(syminfo.tickerid, intraTf, low)
+array<float> pV = request.security_lower_tf(syminfo.tickerid, intraTf, volume)
 
 float vah = na
 float val = na
@@ -183,6 +193,18 @@ if inRTH
     vah := a
     val := b
     poc := c
+
+// ===== Debug (Data Window only; input defaults to off) =====
+// If "1m max/min" are far outside the chart bar's own high/low, TradingView's 1-minute data carries a bad print.
+// If they are sane but "row min/max" or "OR raw" are not, the bug is in this script.
+plot(dbg and array.size(pH) > 0 ? array.max(pH) : na, "DBG 1m max high", display=display.data_window)
+plot(dbg and array.size(pL) > 0 ? array.min(pL) : na, "DBG 1m min low", display=display.data_window)
+plot(dbg ? array.size(pV) : na, "DBG 1m bars in chart bar", display=display.data_window)
+plot(dbg ? base : na, "DBG base (day open)", display=display.data_window)
+plot(dbg ? minI : na, "DBG row min idx", display=display.data_window)
+plot(dbg ? maxI : na, "DBG row max idx", display=display.data_window)
+plot(dbg ? bOrH : na, "DBG OR raw high", display=display.data_window)
+plot(dbg ? bOrL : na, "DBG OR raw low", display=display.data_window)
 
 // ===== Plots (colours follow the article's charts) =====
 plot(inRTH ? pdh : na, "PDH", #e91e63, 1, plot.style_linebr)
@@ -356,7 +378,7 @@ if barstate.islast
 
 // ===== Status table =====
 tblPosition = tblPos == "top left" ? position.top_left : tblPos == "bottom right" ? position.bottom_right : tblPos == "bottom left" ? position.bottom_left : position.top_right
-var table tb = table.new(tblPosition, 2, 6, bgcolor=color.new(color.black, 75), border_width=1)
+var table tb = table.new(tblPosition, 2, 7, bgcolor=color.new(color.black, 75), border_width=1)
 var float lVah = na
 var float lVal = na
 if not na(vah)
@@ -373,6 +395,8 @@ if barstate.islast
     table.cell(tb, 1, 3, str.tostring(dayTrades) + " / " + str.tostring(maxTrades), text_color=color.white, text_size=size.small)
     table.cell(tb, 0, 4, "Big trade / delta", text_color=color.white, text_size=size.small)
     table.cell(tb, 1, 4, "NOT detected: confirm by eye", text_color=color.orange, text_size=size.small)
+    table.cell(tb, 0, 6, "Chart session", text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 6, sawNonRTH ? "ETH ok (ONH/ONL available)" : "RTH-only: ONH/ONL unavailable, switch to ETH", text_color=sawNonRTH ? color.white : color.orange, text_size=size.small)
     table.cell(tb, 0, 5, "Active auto trade", text_color=color.white, text_size=size.small)
     table.cell(tb, 1, 5, tActive ? (tSide == 1 ? "LONG" : "SHORT") : "none", text_color=color.white, text_size=size.small)
 
