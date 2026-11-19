@@ -21,13 +21,13 @@ indicator("KOF Levels + R:R (screener)", shorttitle="KOF L+RR", overlay=true, ma
 // ===== Inputs =====
 tz       = input.string("America/New_York", "Time zone", group="Sessions (article)")
 sRTH     = input.string("0930-1600", "RTH session", group="Sessions (article)")
-sON      = input.string("2100-0929", "Overnight session", group="Sessions (article)")
+sON      = input.string("1600-0929", "Overnight / extended-hours session", group="Sessions (article)", tooltip="Article (futures): 2100-0929 ET. Default changed 2026-11-19 for US ETFs (SPY/QQQ): everything outside RTH, i.e. after-hours + pre-market. Needs the chart set to ETH (extended hours); on an RTH-only chart ONH/ONL do not exist.")
 sOR      = input.string("0930-0935", "Opening range (5 min)", group="Sessions (article)")
 sCand    = input.string("0930-1230", "Auto-candidate window", group="Sessions (article)", tooltip="Article: mostly the first 1 to 3 hours of the NY session.")
 
 binTicks = input.int(4, "Profile bin size (ticks)", minval=1, group="Placeholders (NOT in article)", tooltip="4 ticks = 1.00 point on NQ and ES.")
-confTol  = input.float(2.0, "Confluence tolerance (points)", minval=0.0, group="Placeholders (NOT in article)")
-touchTol = input.float(2.0, "Edge touch tolerance (points)", minval=0.0, group="Placeholders (NOT in article)")
+confTolPct  = input.float(0.01, "Confluence tolerance (% of price)", minval=0.0, step=0.005, group="Placeholders (NOT in article)", tooltip="Changed 2026-11-19 from fixed points (2.0, sized for NQ) to % of price so it scales to SPY/QQQ. 0.01% = about 0.07 on QQQ, about 2.8 pts on MNQ.")
+touchTolPct = input.float(0.01, "Edge touch tolerance (% of price)", minval=0.0, step=0.005, group="Placeholders (NOT in article)")
 warmup   = input.int(30, "Warm-up after 09:30 before candidates (min)", minval=0, group="Placeholders (NOT in article)", tooltip="Early developing value area is built on very little volume. At 15 min a candidate fired with a value area narrower than one average bar. Article: if the structure is not there yet, wait.")
 bufMult  = input.float(0.5, "Stop buffer x average 21-bar range", minval=0.0, group="Placeholders (NOT in article)", tooltip="Article only says stop size is referenced to the rolling 21-bar average candle size, with no multiplier.")
 minRR2   = input.float(2.0, "Minimum R to TP2 (0 = off)", minval=0.0, group="Placeholders (NOT in article)", tooltip="Article Model 1 examples reach about 2.5-3.3R at TP2 and its conservative Model 2 target is about 2R. A candidate with R to TP2 well below that is not a range-edge trade.")
@@ -53,6 +53,8 @@ dbg     = input.bool(false, "Debug: raw 1-minute extrema in Data Window", group=
 
 vaPct   = 0.70 // article: value area = about 70% of volume
 binSize = syminfo.mintick * binTicks
+confTol  = close * confTolPct / 100  // absolute tolerances used below, rescaled every bar
+touchTol = close * touchTolPct / 100
 
 // ===== Sessions =====
 inRTH  = not na(time(timeframe.period, sRTH, tz))

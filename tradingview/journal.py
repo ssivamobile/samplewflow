@@ -7,7 +7,9 @@ One SQLite file, four commands:
   add      log a setup the moment it fires. Log candidates you SKIP too (--taken no --reason ...): the
            skipped ones are what show whether the filters help.
   close    record the exit for a taken trade (price or R). R is computed from entry/stop.
-  stats    win rate, expectancy and splits. It refuses to draw conclusions below --min-trades (30).
+  stats    win rate, expectancy and splits, then a verdict against the pre-registered criteria
+           (FORWARD_TEST.md): >= 100 setups logged, >= 50 closed trades, average NET R >= +0.20, stop at -10R
+           drawdown. Net R subtracts an assumed round-trip cost per share (--cost, default 0.02).
   list     print the rows.
 
 The database lives outside the repo by default (~/.kof_journal.sqlite) so trade records are not committed.
@@ -31,6 +33,17 @@ from pathlib import Path
 DEFAULT_DB = Path.home() / ".kof_journal.sqlite"
 PINE_FILE = Path(__file__).with_name("kof_levels_rr.pine")
 YES_NO = ("yes", "no", "unknown")
+DAY_TYPES = ("trend", "balance", "news", "unknown")  # judged LIVE, before the outcome is known
+ENTRY_TYPES = ("reentry", "edge", "other", "unknown")
+
+# Pre-registered criteria (see FORWARD_TEST.md). Written down before any trade was logged.
+DEFAULT_COST = 0.02     # assumed round-trip cost per share in price units (spread + commission + slippage)
+MIN_LOGGED = 100        # setups logged, taken or skipped
+MIN_CLOSED = 50         # closed taken trades under frozen parameters
+PASS_AVG_R = 0.20       # average NET R per closed taken trade
+STOP_DRAWDOWN_R = -10.0 # cumulative drawdown from peak, in R, that ends the test as a fail
+NEW_COLS = (("day_type", "TEXT"), ("entry_type", "TEXT"), ("tp1_hit", "TEXT"), ("tp2_hit", "TEXT"),
+            ("cost", "REAL"), ("gross_r", "REAL"))  # added 2026-11-19; migrated into older databases
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS freeze (
@@ -71,6 +84,11 @@ def connect(path: Path) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    have = {r["name"] for r in con.execute("PRAGMA table_info(trades)")}
+    for name, typ in NEW_COLS:  # constants above, not user input
+        if name not in have:
+            con.execute(f"ALTER TABLE trades ADD COLUMN {name} {typ}")
+    con.commit()
     return con
 
 
@@ -101,9 +119,11 @@ def cmd_add(con: sqlite3.Connection, a: argparse.Namespace) -> None:
         sys.exit("a skipped setup needs --reason (that is what makes the skipped rows useful)")
     cur = con.execute(
         "INSERT INTO trades (ts,symbol,side,model,entry,stop,tp1,tp2,risk,r_tp1,r_tp2,tools,absorption,bigtrade,delta,"
-        "taken,skip_reason,freeze_id,pine_changed,screenshot,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "taken,skip_reason,freeze_id,pine_changed,screenshot,notes,day_type,entry_type)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (now_utc(), a.symbol, a.side, a.model, a.entry, a.stop, a.tp1, a.tp2, risk, r1, r2, a.tools,
-         a.absorption, a.bigtrade, a.delta, taken, a.reason, fz["id"] if fz else None, changed, a.screenshot, a.notes))
+         a.absorption, a.bigtrade, a.delta, taken, a.reason, fz["id"] if fz else None, changed, a.screenshot, a.notes,
+         a.day_type, a.entry_type))
     con.commit()
     print(f"trade #{cur.lastrowid} logged: {a.side} risk {risk:g}"
           + (f", R to TP1 {r1:.2f}" if r1 else "") + (f", R to TP2 {r2:.2f}" if r2 else ""))
@@ -117,10 +137,12 @@ def cmd_close(con: sqlite3.Connection, a: argparse.Namespace) -> None:
     if (a.exit is None) == (a.r is None):
         sys.exit("give exactly one of --exit PRICE or --r MULTIPLE")
     sign = 1 if t["side"] == "long" else -1
-    r = a.r if a.r is not None else sign * (a.exit - t["entry"]) / t["risk"]
-    con.execute("UPDATE trades SET exit_price=?, outcome_r=?, closed_ts=? WHERE id=?", (a.exit, r, now_utc(), a.id))
+    gross = a.r if a.r is not None else sign * (a.exit - t["entry"]) / t["risk"]
+    net = gross - a.cost / t["risk"]  # outcome_r is NET of the assumed round-trip cost
+    con.execute("UPDATE trades SET exit_price=?, gross_r=?, cost=?, outcome_r=?, tp1_hit=?, tp2_hit=?, closed_ts=? WHERE id=?",
+                (a.exit, gross, a.cost, net, a.tp1_hit, a.tp2_hit, now_utc(), a.id))
     con.commit()
-    print(f"trade #{a.id} closed at {r:+.2f}R")
+    print(f"trade #{a.id} closed: gross {gross:+.2f}R, cost {a.cost / t['risk']:.2f}R, net {net:+.2f}R")
 
 
 def _summary(rows: list) -> str:
@@ -152,9 +174,34 @@ def cmd_stats(con: sqlite3.Connection, a: argparse.Namespace) -> None:
         print("skipped by reason:")
         for reason in sorted({r["skip_reason"] for r in skipped}):
             print(f"  {sum(1 for r in skipped if r['skip_reason'] == reason):3}  {reason}")
-    if len(clean) < a.min_trades:
-        print(f"\nOnly {len(clean)} frozen-parameter trades; below {a.min_trades}. "
-              "Treat every number above as noise, not a result.")
+    for dt in DAY_TYPES:
+        sub = [r for r in clean if r["day_type"] == dt]
+        if sub:
+            print(f"day {dt:11}:", _summary(sub))
+    print("\n" + _verdict(len(allrows), clean))
+
+
+def _verdict(logged: int, clean: list) -> str:
+    """Compare the frozen-parameter results with the pre-registered criteria (net R, drawdown, sample size)."""
+    rs = [r["outcome_r"] for r in sorted(clean, key=lambda r: r["closed_ts"])]
+    peak = cum = worst = 0.0
+    for r in rs:
+        cum += r
+        peak = max(peak, cum)
+        worst = min(worst, cum - peak)
+    n = len(rs)
+    avg = cum / n if n else 0.0
+    se = (sum((r - avg) ** 2 for r in rs) / (n - 1)) ** 0.5 / n ** 0.5 if n > 1 else float("nan")
+    head = f"criteria: logged {logged}/{MIN_LOGGED}, closed {n}/{MIN_CLOSED}, avg net R {avg:+.2f} (need >= {PASS_AVG_R:+.2f}), " \
+           f"max drawdown {worst:+.1f}R (stop at {STOP_DRAWDOWN_R:+.1f}R), std error of avg R {se:.2f}"
+    if worst <= STOP_DRAWDOWN_R:
+        return head + "\nVERDICT: FAIL - drawdown stop hit. Stop the test."
+    if logged < MIN_LOGGED or n < MIN_CLOSED:
+        return head + "\nVERDICT: IN PROGRESS - sample too small, treat the numbers as noise."
+    if avg >= PASS_AVG_R:
+        return head + (f"\nVERDICT: PROMISING, not proven - average is {avg / se:.1f} standard errors above zero (rough guide only: "
+                       "setups on the same day are not independent, and one symbol over a few weeks is one market regime).")
+    return head + "\nVERDICT: FAIL - average net R below the threshold."
 
 
 def cmd_list(con: sqlite3.Connection, a: argparse.Namespace) -> None:
@@ -162,7 +209,8 @@ def cmd_list(con: sqlite3.Connection, a: argparse.Namespace) -> None:
     for r in con.execute("SELECT * FROM trades ORDER BY id"):
         res = "open" if r["taken"] and r["outcome_r"] is None else ("skipped" if not r["taken"] else f"{r['outcome_r']:+.2f}R")
         print(f"#{r['id']:<3} {r['ts']} {r['symbol']} {r['side']:5} entry {r['entry']:g} stop {r['stop']:g} "
-              f"conf {r['absorption']}/{r['bigtrade']}/{r['delta']} {res}")
+              f"conf {r['absorption']}/{r['bigtrade']}/{r['delta']} day {r['day_type']} entry-type {r['entry_type']} "
+              f"tp1/tp2 {r['tp1_hit']}/{r['tp2_hit']} {res}")
 
 
 def main() -> None:
@@ -180,9 +228,13 @@ def main() -> None:
         ad.add_argument(f"--{k}", choices=YES_NO, default="unknown")
     ad.add_argument("--taken", choices=("yes", "no"), required=True); ad.add_argument("--reason")
     ad.add_argument("--screenshot"); ad.add_argument("--notes")
+    ad.add_argument("--day-type", choices=DAY_TYPES, default="unknown", help="judged live, before the outcome")
+    ad.add_argument("--entry-type", choices=ENTRY_TYPES, default="unknown")
     c = sub.add_parser("close"); c.add_argument("id", type=int)
-    c.add_argument("--exit", type=float); c.add_argument("--r", type=float)
-    s = sub.add_parser("stats"); s.add_argument("--min-trades", type=int, default=30)
+    c.add_argument("--exit", type=float); c.add_argument("--r", type=float, help="gross R multiple instead of --exit")
+    c.add_argument("--cost", type=float, default=DEFAULT_COST, help=f"round-trip cost per share, price units (default {DEFAULT_COST})")
+    c.add_argument("--tp1-hit", choices=YES_NO, default="unknown"); c.add_argument("--tp2-hit", choices=YES_NO, default="unknown")
+    sub.add_parser("stats")
     sub.add_parser("list")
     a = p.parse_args()
     con = connect(a.db)
