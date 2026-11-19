@@ -1,0 +1,473 @@
+//@version=6
+// Screener layer for Kai Yasuda, "Sharing My OrderFlow Strategy" (Oct 2026).
+// NOT TESTED IN TRADINGVIEW YET: compile on a 2- or 3-minute NQ/ES (or MNQ/MES) chart and report any error.
+//
+// What it does
+//   1. Levels from the article: PDH/PDL/PDC (RTH), ONH/ONL (21:00-09:29 ET), 5-min opening range,
+//      developing RTH volume profile (VAH / VAL / POC, 70% value area).
+//   2. Alert when price is at VAH/VAL and a market level sits within tolerance ("at least 2 tools overlap").
+//   3. Model 1 candidate (value-area edge poked, then price closes back inside: the article's "SIKE" /
+//      "look above and fail"). It is only a CANDIDATE: absorption, big trades and delta are NOT detected
+//      here (they need tick data with aggressor side). Confirm those by eye on a footprint / Bookmap.
+//   4. R:R box with stop, TP1 = (VAH+VAL)/2, TP2 = opposite value-area edge (this reproduces all three
+//      Model 1 charts in the article), stop moved to breakeven after TP1 (article), alerts on each.
+//   5. Manual mode (any model): type entry / stop / TP1 / TP2 and get the same drawing, R multiples and alerts.
+//
+// Everything in the "Placeholders" group is NOT specified by the article. Tune them, do not trust them.
+// Auto candidates are Model 1 only. For Model 2 use manual mode (target = prior high/low per the article).
+
+indicator("KOF Frequency (measure)", shorttitle="KOF FREQ", overlay=true, max_boxes_count=200, max_lines_count=200, max_labels_count=200)
+
+// ===== Inputs =====
+tz       = input.string("America/New_York", "Time zone", group="Sessions (article)")
+sRTH     = input.string("0930-1600", "RTH session", group="Sessions (article)")
+sON      = input.string("1600-0929", "Overnight / extended-hours session", group="Sessions (article)", tooltip="Article (futures): 2100-0929 ET. Default changed 2026-11-19 for US ETFs (SPY/QQQ): everything outside RTH, i.e. after-hours + pre-market. Needs the chart set to ETH (extended hours); on an RTH-only chart ONH/ONL do not exist.")
+sOR      = input.string("0930-0935", "Opening range (5 min)", group="Sessions (article)")
+sCand    = input.string("0930-1230", "Auto-candidate window", group="Sessions (article)", tooltip="Article: mostly the first 1 to 3 hours of the NY session.")
+
+binTicks = input.int(4, "Profile bin size (ticks)", minval=1, group="Placeholders (NOT in article)", tooltip="4 ticks = 1.00 point on NQ and ES.")
+confTolPct  = input.float(0.01, "Confluence tolerance (% of price)", minval=0.0, step=0.005, group="Placeholders (NOT in article)", tooltip="Changed 2026-11-19 from fixed points (2.0, sized for NQ) to % of price so it scales to SPY/QQQ. 0.01% = about 0.07 on QQQ, about 2.8 pts on MNQ.")
+touchTolPct = input.float(0.01, "Edge touch tolerance (% of price)", minval=0.0, step=0.005, group="Placeholders (NOT in article)")
+warmup   = input.int(30, "Warm-up after 09:30 before candidates (min)", minval=0, group="Placeholders (NOT in article)", tooltip="Early developing value area is built on very little volume. At 15 min a candidate fired with a value area narrower than one average bar. Article: if the structure is not there yet, wait.")
+bufMult  = input.float(0.5, "Stop buffer x average 21-bar range", minval=0.0, group="Placeholders (NOT in article)", tooltip="Article only says stop size is referenced to the rolling 21-bar average candle size, with no multiplier.")
+minRR2   = input.float(2.0, "Minimum R to TP2 (0 = off)", minval=0.0, group="Placeholders (NOT in article)", tooltip="Article Model 1 examples reach about 2.5-3.3R at TP2 and its conservative Model 2 target is about 2R. A candidate with R to TP2 well below that is not a range-edge trade.")
+maxTrades = input.int(3, "Max auto candidates per day", minval=1, group="Placeholders (NOT in article)", tooltip="Article: the bot fires 2-3 times a day.")
+
+stopAnchor = input.string("Sweep extreme", "Stop anchor", options=["Sweep extreme", "Nearest market level"], group="Auto candidate", tooltip="Article: schematic stop is beyond the failed-breakout high; the ES example puts it just above the previous day close, not above the sweep high.")
+entryMode  = input.string("Re-entry close", "Entry price", options=["Re-entry close", "Edge level"], group="Auto candidate")
+reqConf    = input.bool(true, "Require 2 tools (edge + a market level)", group="Auto candidate")
+boxLen     = input.int(40, "Box length (bars)", minval=5, group="Auto candidate")
+
+manualOn = input.bool(false, "Show manual trade", group="Manual trade (any model)")
+mEntry   = input.float(0.0, "Entry", group="Manual trade (any model)")
+mStop    = input.float(0.0, "Stop (below entry = long, above = short)", group="Manual trade (any model)")
+mTp1     = input.float(0.0, "TP1 (0 = none)", group="Manual trade (any model)")
+mTp2     = input.float(0.0, "TP2 (0 = none)", group="Manual trade (any model)")
+
+profSrc = input.string("1-minute bars", "Profile built from", options=["1-minute bars", "Chart bars"], group="Placeholders (NOT in article)", tooltip="Chart bars spread each bar's volume evenly over its high-low range, which inflates the value area on wide, heavy bars. 1-minute bars are closer to a tick profile. Needs a chart timeframe above 1 minute.")
+intraTf = input.string("1", "Intrabar timeframe for the profile", options=["1", "30S", "15S", "5S", "1S"], group="Placeholders (NOT in article)", tooltip="Added 2026-11-19 to test whether finer intrabar data closes the MNQ VAL gap against TradingView's SVP (1-minute bars left VAL 2.75 pts off). Seconds data needs a TradingView plan that has it and has limited history. Applies when 'Profile built from' is 1-minute bars. Opening range always uses 1-minute.")
+gridSnap = input.bool(false, "Snap profile rows to a fixed price grid", group="Placeholders (NOT in article)", tooltip="Added 2026-11-19. TradingView's Session Volume Profile levels sit on a fixed price grid (whole points on MNQ). With this off, rows start at the session's first open (offset by the open's fractional part). Tested against SVP on MNQ Nov 13-18.")
+tblPos  = input.string("bottom right", "Status table position", options=["top right", "top left", "bottom right", "bottom left"], group="Placeholders (NOT in article)")
+
+dbg     = input.bool(false, "Debug: raw 1-minute extrema in Data Window", group="Debug", tooltip="Added 2026-11-19 to chase bad VAL / opening-range values on QQQ. Plots to the Data Window only. Leave off for normal use.")
+
+vaPct   = 0.70 // article: value area = about 70% of volume
+binSize = syminfo.mintick * binTicks
+confTol  = close * confTolPct / 100  // absolute tolerances used below, rescaled every bar
+touchTol = close * touchTolPct / 100
+
+// ===== Sessions =====
+inRTH  = not na(time(timeframe.period, sRTH, tz))
+inON   = not na(time(timeframe.period, sON, tz))
+inCand = not na(time(timeframe.period, sCand, tz))
+// New RTH session: first RTH bar after a non-RTH bar, OR the calendar day (in tz) changed. The second test is
+// needed on RTH-only charts (e.g. stocks/ETFs with the chart set to RTH), where no non-RTH bar ever separates
+// two sessions and the first test alone never fires (levels and profile then accumulate across days).
+newRTH = inRTH and (not inRTH[1] or dayofmonth(time, tz) != dayofmonth(time[1], tz))
+var bool sawNonRTH = false
+if not inRTH
+    sawNonRTH := true
+newON  = inON and not inON[1]
+avgRng = ta.sma(high - low, 21)
+
+// ===== Day levels =====
+var float pdh = na
+var float pdl = na
+var float pdc = na
+var float curH = na
+var float curL = na
+var float curC = na
+var float onH = na
+var float onL = na
+var float orH = na
+var float orL = na
+var int rthStart = na
+var int dayTrades = 0
+
+// Volume profile state (volume spread evenly over each bar's high-low range: no tick data here)
+var array<float> vol = array.new_float(2000, 0.0)
+var float base = na
+var int minI = 1999
+var int maxI = 0
+
+if newRTH
+    pdh := curH
+    pdl := curL
+    pdc := curC
+    curH := high
+    curL := low
+    orH := na
+    orL := na
+    rthStart := time
+    dayTrades := 0
+    array.fill(vol, 0.0)
+    base := gridSnap ? math.floor(open / binSize) * binSize : open
+    minI := 1999
+    maxI := 0
+else if inRTH
+    curH := math.max(curH, high)
+    curL := math.min(curL, low)
+if inRTH
+    curC := close
+
+if newON
+    onH := high
+    onL := low
+else if inON
+    onH := math.max(onH, high)
+    onL := math.min(onL, low)
+
+// Opening range from 1-minute bars so a 2/3-minute chart does not overshoot 09:35
+array<float> orHArr = request.security_lower_tf(syminfo.tickerid, "1", na(time("1", sOR, tz)) ? na : high)
+array<float> orLArr = request.security_lower_tf(syminfo.tickerid, "1", na(time("1", sOR, tz)) ? na : low)
+float bOrH = array.size(orHArr) > 0 ? array.max(orHArr) : na
+float bOrL = array.size(orLArr) > 0 ? array.min(orLArr) : na
+if inRTH
+    orH := na(bOrH) ? orH : (na(orH) ? bOrH : math.max(orH, bOrH))
+    orL := na(bOrL) ? orL : (na(orL) ? bOrL : math.min(orL, bOrL))
+
+// ===== Developing RTH volume profile =====
+f_idx(p) =>
+    int(math.max(0, math.min(1999, math.floor((p - base) / binSize) + 1000)))
+
+f_va() =>
+    float total = 0.0
+    float best = -1.0
+    int pocI = minI
+    for i = minI to maxI
+        float v = array.get(vol, i)
+        total += v
+        if v > best
+            best := v
+            pocI := i
+    int lo = pocI
+    int hi = pocI
+    float acc = best
+    float target = total * vaPct
+    while acc < target and (lo > minI or hi < maxI)
+        float up = 0.0
+        if hi < maxI
+            up += array.get(vol, hi + 1)
+            if hi + 1 < maxI
+                up += array.get(vol, hi + 2)
+        float dn = 0.0
+        if lo > minI
+            dn += array.get(vol, lo - 1)
+            if lo - 1 > minI
+                dn += array.get(vol, lo - 2)
+        if hi < maxI and up >= dn
+            hi := math.min(maxI, hi + 2)
+            acc += up
+        else
+            lo := math.max(minI, lo - 2)
+            acc += dn
+    float vahP = base + (hi - 1000 + 1) * binSize
+    float valP = base + (lo - 1000) * binSize
+    float pocP = base + (pocI - 1000 + 0.5) * binSize
+    [vahP, valP, pocP]
+
+array<float> pH = request.security_lower_tf(syminfo.tickerid, intraTf, high)
+array<float> pL = request.security_lower_tf(syminfo.tickerid, intraTf, low)
+array<float> pV = request.security_lower_tf(syminfo.tickerid, intraTf, volume)
+
+float vah = na
+float val = na
+float poc = na
+if inRTH
+    if profSrc == "1-minute bars" and array.size(pV) > 0
+        for k = 0 to array.size(pV) - 1
+            int lo1 = f_idx(array.get(pL, k))
+            int hi1 = f_idx(array.get(pH, k))
+            float sh1 = array.get(pV, k) / (hi1 - lo1 + 1)
+            for i = lo1 to hi1
+                array.set(vol, i, array.get(vol, i) + sh1)
+            minI := math.min(minI, lo1)
+            maxI := math.max(maxI, hi1)
+    else
+        int lo = f_idx(low)
+        int hi = f_idx(high)
+        float share = volume / (hi - lo + 1)
+        for i = lo to hi
+            array.set(vol, i, array.get(vol, i) + share)
+        minI := math.min(minI, lo)
+        maxI := math.max(maxI, hi)
+    [a, b, c] = f_va()
+    vah := a
+    val := b
+    poc := c
+
+// ===== Debug (Data Window only; input defaults to off) =====
+// If "1m max/min" are far outside the chart bar's own high/low, TradingView's 1-minute data carries a bad print.
+// If they are sane but "row min/max" or "OR raw" are not, the bug is in this script.
+plot(dbg and array.size(pH) > 0 ? array.max(pH) : na, "DBG 1m max high", display=display.data_window)
+plot(dbg and array.size(pL) > 0 ? array.min(pL) : na, "DBG 1m min low", display=display.data_window)
+plot(dbg ? array.size(pV) : na, "DBG 1m bars in chart bar", display=display.data_window)
+plot(dbg ? base : na, "DBG base (day open)", display=display.data_window)
+plot(dbg ? minI : na, "DBG row min idx", display=display.data_window)
+plot(dbg ? maxI : na, "DBG row max idx", display=display.data_window)
+plot(dbg ? bOrH : na, "DBG OR raw high", display=display.data_window)
+plot(dbg ? bOrL : na, "DBG OR raw low", display=display.data_window)
+
+// ===== Plots (colours follow the article's charts) =====
+plot(inRTH ? pdh : na, "PDH", #e91e63, 1, plot.style_linebr)
+plot(inRTH ? pdl : na, "PDL", #e91e63, 1, plot.style_linebr)
+plot(inRTH ? pdc : na, "PDC", #009688, 1, plot.style_linebr)
+plot(inRTH ? onH : na, "ONH", #9c27b0, 1, plot.style_linebr)
+plot(inRTH ? onL : na, "ONL", #9c27b0, 1, plot.style_linebr)
+plot(inRTH ? orH : na, "ORH 5m", #4caf50, 1, plot.style_linebr)
+plot(inRTH ? orL : na, "ORL 5m", #ff9800, 1, plot.style_linebr)
+plot(vah, "VAH", #2962ff, 2, plot.style_linebr)
+plot(val, "VAL", #2962ff, 2, plot.style_linebr)
+plot(poc, "POC", color.red, 1, plot.style_linebr)
+
+// ===== Confluence: value-area edge + a market level =====
+f_near(a, b, tol) =>
+    not na(a) and not na(b) and math.abs(a - b) <= tol
+
+f_conf(edge, lv) =>
+    int c = 0
+    for i = 0 to array.size(lv) - 1
+        if f_near(edge, array.get(lv, i), confTol)
+            c += 1
+    c
+
+f_nearest(entry, lv, above) =>
+    float best = na
+    for i = 0 to array.size(lv) - 1
+        float v = array.get(lv, i)
+        if not na(v)
+            if above and v > entry and (na(best) or v < best)
+                best := v
+            if (not above) and v < entry and (na(best) or v > best)
+                best := v
+    best
+
+mktLvls = array.from(pdh, pdl, pdc, onH, onL, orH, orL)
+int toolsH = 1 + ((inRTH and f_conf(vah, mktLvls) > 0) ? 1 : 0)
+int toolsL = 1 + ((inRTH and f_conf(val, mktLvls) > 0) ? 1 : 0)
+bool touchH = inRTH and toolsH >= 2 and not na(vah) and high >= vah - touchTol and low <= vah + touchTol
+bool touchL = inRTH and toolsL >= 2 and not na(val) and high >= val - touchTol and low <= val + touchTol
+
+// ===== Model 1 candidate: poke beyond the edge, then close back inside =====
+var bool pokeUp = false
+var bool pokeDn = false
+var float sweepHi = na
+var float sweepLo = na
+bool candShort = false
+bool candLong = false
+float minsOpen = na(rthStart) ? 0.0 : (time - rthStart) / 60000.0
+
+if newRTH
+    pokeUp := false
+    pokeDn := false
+
+bool okWin = inRTH and inCand and minsOpen >= warmup and not na(vah[1]) and not na(val[1])
+if okWin
+    if high > vah[1]
+        sweepHi := pokeUp ? math.max(sweepHi, high) : high
+        pokeUp := true
+    if low < val[1]
+        sweepLo := pokeDn ? math.min(sweepLo, low) : low
+        pokeDn := true
+    if pokeUp and close < vah
+        candShort := true
+        pokeUp := false
+    if pokeDn and close > val
+        candLong := true
+        pokeDn := false
+
+// ===== Trade state and drawing =====
+var bool tActive = false
+var int tSide = 0
+var float tEntry = na
+var float tStop = na
+var float tTp1 = na
+var float tTp2 = na
+var bool tHit1 = false
+var int tBar = na
+var box bxRisk = na
+var box bxRew = na
+var line lnTp1 = na
+var label lbl = na
+
+bool openedSh = false
+bool openedLg = false
+bool tp1Now = false
+bool tp2Now = false
+bool stopNow = false
+
+// ----- measurement counters (frequency study; NOT part of the frozen script) -----
+var int nSess = 0
+var int lastProfSess = 0
+var array<int> evRaw = array.new_int()
+var array<int> evSlot = array.new_int()
+var array<int> evTools = array.new_int()
+var array<int> evOpen = array.new_int()
+var array<int> evProf = array.new_int()
+var array<int> sessT = array.new_int()
+if newRTH
+    nSess += 1
+    array.push(sessT, time)
+if inRTH and not na(vah) and lastProfSess != nSess
+    lastProfSess := nSess
+    array.push(evProf, nSess)
+bool rawC = candShort or candLong
+bool slotC = rawC and not tActive and dayTrades < maxTrades
+bool toolsC = slotC and (candShort ? toolsH : toolsL) >= 2
+if rawC
+    array.push(evRaw, nSess)
+if slotC
+    array.push(evSlot, nSess)
+if toolsC
+    array.push(evTools, nSess)
+
+if (candShort or candLong) and not tActive and dayTrades < maxTrades and (not reqConf or (candShort ? toolsH : toolsL) >= 2)
+    bool sh = candShort
+    float edge = sh ? vah : val
+    float opp = sh ? val : vah
+    float swp = sh ? sweepHi : sweepLo
+    float ent = entryMode == "Edge level" ? edge : close
+    float lvl = f_nearest(ent, mktLvls, sh)
+    float anc = (stopAnchor == "Nearest market level" and not na(lvl)) ? lvl : swp
+    float stp = sh ? anc + bufMult * avgRng : anc - bufMult * avgRng
+    float mid = (vah + val) / 2
+    float rsk = math.abs(stp - ent)
+    bool dirOK = sh ? (stp > ent and mid < ent and opp < ent) : (stp < ent and mid > ent and opp > ent)
+    if dirOK and rsk > 0 and math.abs(opp - ent) / rsk >= minRR2
+        float rr1 = math.abs(mid - ent) / rsk
+        float rr2 = math.abs(opp - ent) / rsk
+        tActive := true
+        tSide := sh ? -1 : 1
+        tEntry := ent
+        tStop := stp
+        tTp1 := mid
+        tTp2 := opp
+        tHit1 := false
+        tBar := bar_index
+        dayTrades += 1
+        openedSh := sh
+        openedLg := not sh
+        bxRisk := box.new(bar_index, math.max(ent, stp), bar_index + boxLen, math.min(ent, stp), border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 85))
+        bxRew := box.new(bar_index, math.max(ent, opp), bar_index + boxLen, math.min(ent, opp), border_color=color.new(color.green, 60), bgcolor=color.new(color.green, 85))
+        lnTp1 := line.new(bar_index, mid, bar_index + boxLen, mid, color=color.teal, style=line.style_dotted)
+        string txt = (sh ? "SHORT" : "LONG") + " candidate (Model 1 re-entry)\nEntry " + str.tostring(ent, format.mintick) + "  Stop " + str.tostring(stp, format.mintick) + "\nRisk " + str.tostring(rsk, format.mintick) + " pts ($" + str.tostring(rsk * syminfo.pointvalue, "#") + "/contract)\nR to TP1 " + str.tostring(rr1, "#.##") + "   R to TP2 " + str.tostring(rr2, "#.##") + "\nConfirm: absorption / big trade / delta"
+        lbl := label.new(bar_index, ent, txt, style=sh ? label.style_label_down : label.style_label_up, color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+
+if openedSh or openedLg
+    array.push(evOpen, nSess)
+
+if tActive and bar_index > tBar
+    bool stopTouch = tSide == 1 ? low <= tStop : high >= tStop
+    bool t1Touch = tSide == 1 ? high >= tTp1 : low <= tTp1
+    bool t2Touch = tSide == 1 ? high >= tTp2 : low <= tTp2
+    if stopTouch
+        // if stop and a target are touched in the same bar, assume the stop came first
+        stopNow := true
+        tActive := false
+        label.new(bar_index, tStop, tHit1 ? "Stopped at breakeven" : "Stopped", style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.tiny)
+    else
+        if t1Touch and not tHit1
+            tp1Now := true
+            tHit1 := true
+            tStop := tEntry // article: stop to breakeven after TP1
+            label.new(bar_index, tTp1, "TP1: stop to breakeven", style=label.style_label_left, color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+        if t2Touch
+            tp2Now := true
+            tActive := false
+            label.new(bar_index, tTp2, "TP2 (opposite value edge)", style=label.style_label_left, color=color.new(color.green, 20), textcolor=color.white, size=size.tiny)
+    box.set_right(bxRisk, bar_index)
+    box.set_right(bxRew, bar_index)
+    line.set_x2(lnTp1, bar_index)
+
+// ===== Manual trade (any model) =====
+var array<line> mLines = array.new<line>()
+var array<label> mLabels = array.new<label>()
+bool mOn = manualOn and mEntry > 0 and mStop > 0 and mEntry != mStop
+bool mLong = mStop < mEntry
+
+if barstate.islast
+    for l in mLines
+        line.delete(l)
+    array.clear(mLines)
+    for b2 in mLabels
+        label.delete(b2)
+    array.clear(mLabels)
+    if mOn
+        float risk = math.abs(mEntry - mStop)
+        int x2 = bar_index + boxLen
+        array.push(mLines, line.new(bar_index, mEntry, x2, mEntry, color=color.gray))
+        array.push(mLines, line.new(bar_index, mStop, x2, mStop, color=color.red))
+        string t = (mLong ? "LONG" : "SHORT") + " manual\nRisk " + str.tostring(risk, format.mintick) + " pts ($" + str.tostring(risk * syminfo.pointvalue, "#") + "/contract)"
+        if mTp1 > 0
+            array.push(mLines, line.new(bar_index, mTp1, x2, mTp1, color=color.teal))
+            t += "\nR to TP1 " + str.tostring(math.abs(mTp1 - mEntry) / risk, "#.##")
+        if mTp2 > 0
+            array.push(mLines, line.new(bar_index, mTp2, x2, mTp2, color=color.green))
+            t += "\nR to TP2 " + str.tostring(math.abs(mTp2 - mEntry) / risk, "#.##")
+        array.push(mLabels, label.new(bar_index, mEntry, t, style=mLong ? label.style_label_up : label.style_label_down, color=color.new(color.gray, 20), textcolor=color.white, size=size.small))
+
+// ===== Status table =====
+tblPosition = tblPos == "top left" ? position.top_left : tblPos == "bottom right" ? position.bottom_right : tblPos == "bottom left" ? position.bottom_left : position.top_right
+var table tb = table.new(tblPosition, 2, 7, bgcolor=color.new(color.black, 75), border_width=1)
+var float lVah = na
+var float lVal = na
+if not na(vah)
+    lVah := vah
+    lVal := val
+if barstate.islast
+    table.cell(tb, 0, 0, "Avg 21-bar range", text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 0, str.tostring(avgRng, format.mintick) + " pts", text_color=color.white, text_size=size.small)
+    table.cell(tb, 0, 1, inRTH ? "VAH / VAL (live)" : "VAH / VAL (last RTH)", text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 1, str.tostring(lVah, format.mintick) + " / " + str.tostring(lVal, format.mintick), text_color=color.white, text_size=size.small)
+    table.cell(tb, 0, 2, "Tools at VAH / VAL", text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 2, inRTH ? str.tostring(toolsH) + " / " + str.tostring(toolsL) + " (max 2 auto)" : "n/a (outside RTH)", text_color=color.white, text_size=size.small)
+    table.cell(tb, 0, 3, "Auto candidates today", text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 3, str.tostring(dayTrades) + " / " + str.tostring(maxTrades), text_color=color.white, text_size=size.small)
+    table.cell(tb, 0, 4, "Big trade / delta", text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 4, "NOT detected: confirm by eye", text_color=color.orange, text_size=size.small)
+    table.cell(tb, 0, 6, "Chart session", text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 6, sawNonRTH ? "ETH ok (ONH/ONL available)" : "RTH-only: ONH/ONL unavailable, switch to ETH", text_color=sawNonRTH ? color.white : color.orange, text_size=size.small)
+    table.cell(tb, 0, 5, "Active auto trade", text_color=color.white, text_size=size.small)
+    table.cell(tb, 1, 5, tActive ? (tSide == 1 ? "LONG" : "SHORT") : "none", text_color=color.white, text_size=size.small)
+
+// ===== Measurement table (frequency study) =====
+f_cnt(arr, fromSess) =>
+    int c = 0
+    for i = 0 to array.size(arr) - 1
+        if array.get(arr, i) > fromSess
+            c += 1
+    c
+
+var table tf = table.new(position.top_left, 2, 8, bgcolor=color.new(color.black, 70), border_width=1)
+if barstate.islast
+    int fromS = math.max(0, nSess - 20)
+    int used = nSess - fromS
+    string startTxt = array.size(sessT) > 0 ? str.format_time(array.get(sessT, fromS), "yyyy-MM-dd", tz) : "n/a"
+    int nOpen = f_cnt(evOpen, fromS)
+    table.cell(tf, 0, 0, "FREQ sessions loaded / window", text_color=color.white, text_size=size.small)
+    table.cell(tf, 1, 0, str.tostring(nSess) + " / " + str.tostring(used), text_color=color.white, text_size=size.small)
+    table.cell(tf, 0, 1, "Window starts", text_color=color.white, text_size=size.small)
+    table.cell(tf, 1, 1, startTxt, text_color=color.white, text_size=size.small)
+    table.cell(tf, 0, 2, "Sessions with a profile", text_color=color.white, text_size=size.small)
+    table.cell(tf, 1, 2, str.tostring(f_cnt(evProf, fromS)), text_color=color.white, text_size=size.small)
+    table.cell(tf, 0, 3, "Raw poke + re-entry", text_color=color.white, text_size=size.small)
+    table.cell(tf, 1, 3, str.tostring(f_cnt(evRaw, fromS)), text_color=color.white, text_size=size.small)
+    table.cell(tf, 0, 4, "  and slot free", text_color=color.white, text_size=size.small)
+    table.cell(tf, 1, 4, str.tostring(f_cnt(evSlot, fromS)), text_color=color.white, text_size=size.small)
+    table.cell(tf, 0, 5, "  and 2 tools overlap", text_color=color.white, text_size=size.small)
+    table.cell(tf, 1, 5, str.tostring(f_cnt(evTools, fromS)), text_color=color.white, text_size=size.small)
+    table.cell(tf, 0, 6, "  and R to TP2 >= min (opened)", text_color=color.yellow, text_size=size.small)
+    table.cell(tf, 1, 6, str.tostring(nOpen), text_color=color.yellow, text_size=size.small)
+    table.cell(tf, 0, 7, "Opened per session", text_color=color.white, text_size=size.small)
+    table.cell(tf, 1, 7, used > 0 ? str.tostring(nOpen / used, "#.##") : "n/a", text_color=color.white, text_size=size.small)
+
+// ===== Alerts =====
+alertcondition(touchH or touchL, "Area of interest at VAH/VAL", "Price at a value-area edge that coincides with a market level: check order flow")
+alertcondition(openedSh, "Model 1 SHORT candidate", "Model 1 short candidate: value-area high poked and lost. Confirm absorption / big trade / delta")
+alertcondition(openedLg, "Model 1 LONG candidate", "Model 1 long candidate: value-area low poked and lost. Confirm absorption / big trade / delta")
+alertcondition(tp1Now, "Auto trade TP1", "TP1 (range midpoint) touched: stop to breakeven")
+alertcondition(tp2Now, "Auto trade TP2", "TP2 (opposite value-area edge) touched")
+alertcondition(stopNow, "Auto trade stop", "Stop touched")
+alertcondition(mOn and (mLong ? low <= mStop : high >= mStop), "Manual stop", "Manual trade: stop level touched")
+alertcondition(mOn and mTp1 > 0 and (mLong ? high >= mTp1 : low <= mTp1), "Manual TP1", "Manual trade: TP1 level touched")
+alertcondition(mOn and mTp2 > 0 and (mLong ? high >= mTp2 : low <= mTp2), "Manual TP2", "Manual trade: TP2 level touched")

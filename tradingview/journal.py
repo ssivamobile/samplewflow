@@ -29,6 +29,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 DEFAULT_DB = Path.home() / ".kof_journal.sqlite"
 PINE_FILE = Path(__file__).with_name("kof_levels_rr.pine")
@@ -42,6 +43,8 @@ MIN_LOGGED = 100        # setups logged, taken or skipped
 MIN_CLOSED = 50         # closed taken trades under frozen parameters
 PASS_AVG_R = 0.20       # average NET R per closed taken trade
 STOP_DRAWDOWN_R = -10.0 # cumulative drawdown from peak, in R, that ends the test as a fail
+UNIVERSE = ("SPY", "QQQ", "IWM", "NVDA", "TSLA", "MSFT")  # pre-registered v2 universe
+MAX_TAKEN_PER_DAY = 3   # across all symbols, New York calendar day
 NEW_COLS = (("day_type", "TEXT"), ("entry_type", "TEXT"), ("tp1_hit", "TEXT"), ("tp2_hit", "TEXT"),
             ("cost", "REAL"), ("gross_r", "REAL"))  # added 2026-11-19; migrated into older databases
 
@@ -117,6 +120,13 @@ def cmd_add(con: sqlite3.Connection, a: argparse.Namespace) -> None:
     taken = 1 if a.taken == "yes" else 0
     if not taken and not a.reason:
         sys.exit("a skipped setup needs --reason (that is what makes the skipped rows useful)")
+    if taken:
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        n_today = sum(1 for r in con.execute("SELECT ts FROM trades WHERE taken=1")
+                      if datetime.fromisoformat(r["ts"]).astimezone(ZoneInfo("America/New_York")).date() == today)
+        if n_today >= MAX_TAKEN_PER_DAY:
+            sys.exit(f"daily cap reached ({n_today}/{MAX_TAKEN_PER_DAY} taken today, New York date): "
+                     "log this setup with --taken no --reason \"daily cap\"")
     cur = con.execute(
         "INSERT INTO trades (ts,symbol,side,model,entry,stop,tp1,tp2,risk,r_tp1,r_tp2,tools,absorption,bigtrade,delta,"
         "taken,skip_reason,freeze_id,pine_changed,screenshot,notes,day_type,entry_type)"
@@ -174,6 +184,10 @@ def cmd_stats(con: sqlite3.Connection, a: argparse.Namespace) -> None:
         print("skipped by reason:")
         for reason in sorted({r["skip_reason"] for r in skipped}):
             print(f"  {sum(1 for r in skipped if r['skip_reason'] == reason):3}  {reason}")
+    for sym in UNIVERSE:
+        sub = [r for r in clean if r["symbol"] == sym]
+        if sub:
+            print(f"symbol {sym:8}:", _summary(sub))
     for dt in DAY_TYPES:
         sub = [r for r in clean if r["day_type"] == dt]
         if sub:
@@ -220,7 +234,8 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("freeze"); f.add_argument("--note", default="")
     ad = sub.add_parser("add")
-    ad.add_argument("--symbol", required=True); ad.add_argument("--side", required=True, choices=("long", "short"))
+    ad.add_argument("--symbol", required=True, type=str.upper, choices=UNIVERSE)
+    ad.add_argument("--side", required=True, choices=("long", "short"))
     ad.add_argument("--entry", type=float, required=True); ad.add_argument("--stop", type=float, required=True)
     ad.add_argument("--tp1", type=float); ad.add_argument("--tp2", type=float)
     ad.add_argument("--model", type=int, default=1, choices=(1, 2)); ad.add_argument("--tools", type=int)
