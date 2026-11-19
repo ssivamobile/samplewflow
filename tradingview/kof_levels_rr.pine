@@ -28,9 +28,9 @@ sCand    = input.string("0930-1230", "Auto-candidate window", group="Sessions (a
 binTicks = input.int(4, "Profile bin size (ticks)", minval=1, group="Placeholders (NOT in article)", tooltip="4 ticks = 1.00 point on NQ and ES.")
 confTol  = input.float(2.0, "Confluence tolerance (points)", minval=0.0, group="Placeholders (NOT in article)")
 touchTol = input.float(2.0, "Edge touch tolerance (points)", minval=0.0, group="Placeholders (NOT in article)")
-warmup   = input.int(15, "Warm-up after 09:30 before candidates (min)", minval=0, group="Placeholders (NOT in article)", tooltip="Early developing value area is built on very little volume.")
+warmup   = input.int(30, "Warm-up after 09:30 before candidates (min)", minval=0, group="Placeholders (NOT in article)", tooltip="Early developing value area is built on very little volume. At 15 min a candidate fired with a value area narrower than one average bar. Article: if the structure is not there yet, wait.")
 bufMult  = input.float(0.5, "Stop buffer x average 21-bar range", minval=0.0, group="Placeholders (NOT in article)", tooltip="Article only says stop size is referenced to the rolling 21-bar average candle size, with no multiplier.")
-minRR2   = input.float(0.0, "Minimum R to TP2 (0 = off)", minval=0.0, group="Placeholders (NOT in article)")
+minRR2   = input.float(2.0, "Minimum R to TP2 (0 = off)", minval=0.0, group="Placeholders (NOT in article)", tooltip="Article Model 1 examples reach about 2.5-3.3R at TP2 and its conservative Model 2 target is about 2R. A candidate with R to TP2 well below that is not a range-edge trade.")
 maxTrades = input.int(3, "Max auto candidates per day", minval=1, group="Placeholders (NOT in article)", tooltip="Article: the bot fires 2-3 times a day.")
 
 stopAnchor = input.string("Sweep extreme", "Stop anchor", options=["Sweep extreme", "Nearest market level"], group="Auto candidate", tooltip="Article: schematic stop is beyond the failed-breakout high; the ES example puts it just above the previous day close, not above the sweep high.")
